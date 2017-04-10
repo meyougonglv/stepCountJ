@@ -1,0 +1,393 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using Windows.Foundation;
+using Windows.Foundation.Collections;
+using Windows.UI.Xaml;
+using Windows.UI.Xaml.Controls;
+using Windows.UI.Xaml.Controls.Primitives;
+using Windows.UI.Xaml.Data;
+using Windows.UI.Xaml.Input;
+using Windows.UI.Xaml.Media;
+using Windows.UI.Xaml.Navigation;
+using System.ComponentModel;
+using System.Dynamic;
+using Windows.Devices.Sensors;
+using System.Windows.Input;
+using Windows.Storage;
+using Windows.Storage.Pickers;
+using Windows.Storage.Streams;
+using Windows.UI.Core;
+using Windows.Devices.Input;
+using Microsoft.CSharp;
+using Windows.UI.Xaml.Shapes;
+using System.Reflection;
+using Windows.UI;
+using Windows.UI.Input.Inking;
+using Windows.UI.Popups;
+using System.Threading;
+using System.Threading.Tasks;
+
+
+namespace AcMap
+{
+    /// <summary>
+    /// 可用于自身或导航至 Frame 内部的空白页。
+    /// </summary>
+    public sealed partial class MainPage : Page
+    {
+        InkManager MyInkManager = new InkManager();
+        double X1, X2, Y1, Y2, StrokeThickness = 1;
+        Line line;
+        Line line2;
+        Ellipse NewEllipse;
+        Polyline Pencil;
+        Color BorderColor = Colors.Red, FillColor;
+        uint PenID, TouchID;
+        //Line line2 = new Line();
+        bool flag = true;      
+        Accelerometer accelermeter = Accelerometer.GetDefault();
+        Gyrometer gyrometer = Gyrometer.GetDefault();
+        OrientationSensor orientation = OrientationSensor.GetDefault();
+        Compass compass = Compass.GetDefault();
+        double[] accelerationX = new double[2];
+        double[] accelerationY = new double[2];
+        double[] velocityX = new double[2];
+        double[] velocityY = new double[2];
+        double[] positionX = new double[2];
+        double[] positionY = new double[2];
+        double yaw;
+        double pitch;
+        double roll;
+        double w;
+        double x;
+        double y;
+        double z;
+        double angle = 180/Math.PI;
+        double constgravity = 9.78046;
+        double time;
+        double AccX;
+        double AccY;
+        double AccZ;
+        double Acc;
+        double LastValue=0;
+        double LastDirection;
+        double[] LastExtremes = new double[2];
+        double Limit=0.5;                       //  test to decide
+        double LastDiff;
+        double LastMatch;
+        int StepCount;
+		double [,]A = new double[2,2];  /* X(n)=A*X(n-1)+B*U(n),U(n)~N(0,q), 2x2 */
+        double[,] B = new double[2,1];
+		double [,]H = new double[1,2];     /* Z(n)=H*X(n)+W(n),W(n)~N(0,r), 1x2   */
+		double [,]q = new double[2,1];     /* process(predict) noise convariance,2x1 [q0,0; 0,q1] */
+		double [,]p = new double[2,2];  /* estimated error convariance,2x2 [p0 p1; p2 p3] */
+		double [,]gain = new double[2,1];  /* 2x1 */
+        double lineBegX = 0;
+        double lineBegY = 0;
+        double TempX = 0;
+        double TempY = 0;
+        double StepLength = 0.2;
+        double Scale = 10;
+        double Runtime = 0;
+        System.Diagnostics.Stopwatch Time = new System.Diagnostics.Stopwatch();
+        System.Diagnostics.Stopwatch RunTime = new System.Diagnostics.Stopwatch(); 
+
+
+        private async void ReadingChanged(object sender, AccelerometerReadingChangedEventArgs e)
+        {
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            {
+                AccelerometerReading reading = e.Reading;
+                AccX = e.Reading.AccelerationX;
+                AccY = e.Reading.AccelerationY;
+                AccZ = e.Reading.AccelerationZ;
+                Pedometer();
+                //textbox_x.Text = String.Format("{0,5:0.0000}", reading.AccelerationX);
+                //textbox_y.Text = String.Format("{0,5:0.0000}", reading.AccelerationY);
+
+            });
+        }
+        private async void OriReadingChanged(object sender, OrientationSensorReadingChangedEventArgs se)
+        {
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            {
+                OrientationSensorReading orireading = se.Reading;
+                w = se.Reading.Quaternion.W;
+                x = se.Reading.Quaternion.X;
+                y = se.Reading.Quaternion.Y;
+                z = se.Reading.Quaternion.Z;
+                yaw = Math.Atan2(2 * w * z + 2 * x * y, 1 - 2 * y * y - 2 * z * z);
+                // yaw = Math.Atan2(2 * x * y-2 * w * z , 2 * y * y +2 * z * z - 1);
+                pitch = Math.Asin(2 * w * y - 2 * z * x);
+                roll = Math.Atan2(2 * w * x + 2 * y * z, 1 - 2 * x * x - 2 * y * y);
+            });
+        }
+
+        public MainPage()
+        {  
+            //*********************************
+            //Initialization of the canvas
+            //*********************************
+            this.InitializeComponent();
+            canvas.PointerMoved += canvas_PointerMoved;
+            canvas.PointerReleased += canvas_PointerReleased;
+            canvas.PointerPressed += canvas_PointerPressed;
+            canvas.PointerExited += canvas_PointerExited;
+            // Assign an event handler for the reading-changed event
+            accelermeter.ReadingChanged += new TypedEventHandler<Accelerometer, AccelerometerReadingChangedEventArgs>(ReadingChanged);
+            orientation.ReadingChanged += new TypedEventHandler<OrientationSensor, OrientationSensorReadingChangedEventArgs>(OriReadingChanged);
+        }
+        //*********************************
+        //Detect pointer
+        //*********************************
+        private void canvas_PointerExited(object sender, PointerRoutedEventArgs e)
+        {
+            Window.Current.CoreWindow.PointerCursor = new CoreCursor(CoreCursorType.Arrow, 1);
+        }
+        //*********************************
+        //Detect pointer pressed
+        //*********************************
+        private void canvas_PointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            Window.Current.CoreWindow.PointerCursor = new CoreCursor(CoreCursorType.UniversalNo, 1);
+            line = new Line();
+            line.X1 = e.GetCurrentPoint(canvas).Position.X;
+            line.Y1 = e.GetCurrentPoint(canvas).Position.Y;
+            TempX = e.GetCurrentPoint(canvas).Position.X;
+            TempY = e.GetCurrentPoint(canvas).Position.Y;
+            //
+            //needs to be fixed
+            //
+            line.X2 = line.X1 + 1;
+            line.Y2 = line.Y1 + 1;
+            line.StrokeThickness = 3;
+            line.Stroke = new SolidColorBrush(BorderColor);
+            canvas.Children.Add(line);
+        }
+        //*********************************
+        //Detect pointer released
+        //*********************************
+        private void canvas_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            if (e.Pointer.PointerId == PenID || e.Pointer.PointerId == TouchID)
+                MyInkManager.ProcessPointerUp(e.GetCurrentPoint(canvas));
+            TouchID = 0;
+            PenID = 0;
+            e.Handled = true;
+            Pencil = null;
+            line = null;
+            NewEllipse = null;
+        }
+        //*********************************
+        //Detect pointer moved
+        //*********************************
+        private void canvas_PointerMoved(object sender, PointerRoutedEventArgs e)
+        {           
+            Window.Current.CoreWindow.PointerCursor = new CoreCursor(CoreCursorType.UniversalNo, 1);
+            if (e.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed == true)
+            {              
+                line.X2 = e.GetCurrentPoint(canvas).Position.X;
+                line.Y2 = e.GetCurrentPoint(canvas).Position.Y;               
+            }
+        }
+
+        /// <summary>
+        /// 在此页将要在 Frame 中显示时进行调用。
+        /// </summary>
+        /// <param name="e">描述如何访问此页的事件数据。Paramete
+        /// 属性通常用于配置页。</param>
+        
+        protected override  void OnNavigatedTo(NavigationEventArgs e)
+        {
+            //Accelerometer accelermeter = Accelerometer.GetDefault();
+            //accelermeter.ReportInterval = 2;
+            //accelermeter.ReadingChanged += new TypedEventHandler<Accelerometer, AccelerometerReadingChangedEventArgs>(ReadingChanged);           
+        }
+       
+        private async void onSelectFile(object sender, RoutedEventArgs e)
+        {
+            //Set the map 
+            FileOpenPicker picker = new FileOpenPicker();
+            picker.FileTypeFilter.Add(".jpg");
+            picker.FileTypeFilter.Add(".jpeg");
+            picker.FileTypeFilter.Add(".png");
+            picker.SuggestedStartLocation = PickerLocationId.PicturesLibrary;
+            StorageFile file = await picker.PickSingleFileAsync();
+            if (file != null)
+            {
+                IRandomAccessStream stream = await file.OpenAsync(FileAccessMode.Read);
+                Windows.UI.Xaml.Media.Imaging.BitmapImage bmp = new Windows.UI.Xaml.Media.Imaging.BitmapImage();
+                bmp.SetSource(stream);
+                //Show map
+                this.img.Source = bmp;
+            }
+        }
+
+        private void button_reset_Click(object sender, RoutedEventArgs e)
+        {
+            //canvas.Children.Clear(); //determine whether clear the old path data 
+            StepCount = 0;
+            RunTime.Reset();
+            lineBegX = TempX;
+            lineBegY = TempY;
+        }
+        //*********************************
+        //Enlarge the map
+        //*********************************
+        private void button_enlarge_Click(object sender, RoutedEventArgs e)
+        {
+            img.Width = Convert.ToInt32(img.Width * 1.05);
+            img.Height = Convert.ToInt32(img.Height * 1.05);
+        }
+        
+        private  void button_orignset_Click(object sender, RoutedEventArgs e)
+        {
+            lineBegX = TempX;
+            lineBegY = TempY;
+        }
+
+        private void button_exit_Click(object sender, RoutedEventArgs e)
+        {
+
+            flag = false;
+            Time.Stop();
+            RunTime.Stop();
+            canvas.Children.Clear();
+            App.Current.Exit();
+        }
+
+        private async void button_measure_Click(object sender, RoutedEventArgs e)
+        {
+            string logname = "record.txt";
+
+            StorageFolder folder = ApplicationData.Current.LocalFolder;
+            StorageFolder tempfolder = await folder.CreateFolderAsync("AcMap_LogFile", CreationCollisionOption.GenerateUniqueName);
+            StorageFile file = await tempfolder.CreateFileAsync(logname, CreationCollisionOption.OpenIfExists);
+            
+            await FileIO.AppendTextAsync(file, " PosX " + "    ");
+            await FileIO.AppendTextAsync(file, " PosY " + "    ");
+            await FileIO.AppendTextAsync(file, " Yaw" + "    ");
+            await FileIO.AppendTextAsync(file, " Roll" + "    ");
+            await FileIO.AppendTextAsync(file, " Pitch" + "    ");
+            await FileIO.AppendTextAsync(file, " Step " + "\r\n");
+
+            //initialize parameters
+            //lineBegX = canvas.Width / 2;
+            //lineBegY = canvas.Height / 2;
+            positionX[1] = 0;
+            positionY[1] = 0;
+            StepCount = 0;
+            RunTime.Start();
+            
+
+            while(flag==true)
+            {
+                Runtime = RunTime.Elapsed.Seconds;
+                textbox_x.Text = String.Format("{0,8:0.00000}", StepLength + "m");
+                textbox_y.Text = String.Format("{0,8:0.00}", Runtime); 
+                textbox_z.Text = String.Format("{0,10:0}", StepCount);
+                await FileIO.AppendTextAsync(file, positionX[1] + "    " + positionY[1] + "    " + yaw + "    " + roll + "    " + pitch + "    " + StepCount + "\r\n");
+            }
+                                       
+        }
+
+        private async void button_confirm_Click(object sender, RoutedEventArgs e)
+        {
+            
+            StorageFolder folder = ApplicationData.Current.LocalFolder;
+            StorageFolder tempfolder1 = await folder.CreateFolderAsync("AcMap_StoredPosition", CreationCollisionOption.GenerateUniqueName);
+            string positionlog = "stored_position.txt";
+            StorageFile position = await tempfolder1.CreateFileAsync(positionlog, CreationCollisionOption.OpenIfExists);
+            await FileIO.AppendTextAsync(position, positionX[1] + "    " + positionY[1]  + "\r\n");
+        }
+        //*********************************
+        //Shrink the map
+        //*********************************
+        private void button_shrink_Click(object sender, RoutedEventArgs e)
+        {
+            img.Width = Convert.ToInt32(img.Width / 1.05);
+            img.Height = Convert.ToInt32(img.Height /1.05);
+        }
+
+        private void Pedometer()
+        {
+            Acc = Math.Abs(AccX) + Math.Abs(AccY) + Math.Abs(AccZ);//use 1-norm of all 3 accelerations
+            //Acc = Math.Abs(AccZ);//only use Z-acceleration
+            //Acc = Math.Abs(AccY);//only use Y-acceleration
+            double direction = (Acc > LastValue ? 1 : (Acc < LastValue ? -1 : 0));
+            if (direction == -LastDirection&&direction!=0) {
+                    //direction change
+                int extType = (direction > 0 ? 0 : 1);//min or max(peak or valley)
+                LastExtremes[extType] = LastValue;
+                double diff = Math.Abs(LastExtremes[extType] - LastExtremes[1 - extType]);
+                if (diff > Limit) {
+                    //Boolean isAlmostAsLargeAsPrevious = true;
+                    Boolean isAlmostAsLargeAsPrevious = (diff > (LastDiff * 2 / 3));
+                    Boolean isPreviousLargeEnough =( LastDiff > (diff / 3));
+                    Boolean isNotContra = (LastMatch != 1 - extType);                  
+                    if (isAlmostAsLargeAsPrevious && isPreviousLargeEnough && isNotContra)
+                    {
+                        if (StepCount >= 1)
+                        {
+                            time = Time.ElapsedMilliseconds;
+                            if (time >= 200 && time <= 2000)
+                            {
+                                StepCount++;
+                                MapDraw();
+                                LastMatch = extType;
+                                Time.Reset();
+                            }
+                            else if (time > 2000)
+                            {
+                                StepCount++;
+                                MapDraw();
+                                Time.Reset();
+                            }
+                        }
+                        else if (StepCount == 0)
+                        {
+                            StepCount++;
+                            MapDraw();
+                            LastMatch = extType;
+                            Time.Reset();
+                        }
+                    }
+                    else {
+                        LastMatch = -1;
+                    }
+                }
+                LastDiff = diff;
+            }
+            LastDirection = direction;
+            LastValue = Acc;
+            Time.Start();
+        }
+        private void MapDraw()
+        {
+            positionX[1] = StepLength * Scale * Math.Sin(-yaw);                        
+            positionY[1] = StepLength * Scale * Math.Cos(-yaw);
+            //******************
+            // Present position
+            //******************                
+            textbox_Px.Text = String.Format("{0,5:0.0000}", positionX[1]);
+            //textbox_Px.Text = String.Format("{0,5:0.0000}",A[0,0]);
+            textbox_Py.Text = String.Format("{0,5:0.0000}", positionY[1]);
+            //***************************************
+            // Match the scale of map to environment
+            //***************************************                   
+            line2 = new Line();
+            line2.X1 = lineBegX;
+            line2.Y1 = lineBegY;
+            line2.X2 = line2.X1 + positionX[1];
+            line2.Y2 = line2.Y1 - positionY[1];
+            lineBegX = line2.X2;
+            lineBegY = line2.Y2;
+
+            line2.StrokeThickness = 3;
+            line2.Stroke = new SolidColorBrush(BorderColor);
+            canvas.Children.Add(line2);
+        } 
+    }
+}
